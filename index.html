@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ソナー探知 潜水艦ゲーム</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  canvas { display: block; touch-action: none; }
+  .hud { font-family: 'Courier New', monospace; }
+  @keyframes scanRing { from{opacity:0.8;transform:scale(0)} to{opacity:0;transform:scale(1)} }
+  .scan-ring { animation: scanRing 2s linear infinite; }
+  body { overflow: hidden; }
+</style>
+</head>
+<body class="bg-gray-950 text-gray-100">
+<script>
+function escapeHtml(str){return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');}
+</script>
+
+<div class="flex flex-col md:flex-row h-screen gap-0">
+  <!-- Sonar Display -->
+  <div class="flex-1 flex items-center justify-center bg-black relative">
+    <canvas id="sonarCanvas"></canvas>
+    <div id="gameOverlay" class="absolute inset-0 flex items-center justify-center hidden">
+      <div class="bg-gray-900 border border-indigo-500 rounded-xl p-8 text-center">
+        <h2 id="overlayTitle" class="text-3xl font-bold text-yellow-300 mb-2">ゲーム開始</h2>
+        <p id="overlayScore" class="text-gray-400 mb-4"></p>
+        <button onclick="startGame()" class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-lg font-bold">スタート</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- HUD Panel -->
+  <div class="w-full md:w-56 bg-gray-950 border-t md:border-t-0 md:border-l border-green-900 p-3 hud space-y-3">
+    <div class="text-green-400 text-xs text-center border-b border-green-900 pb-2 font-bold tracking-widest">== SONAR HUD ==</div>
+
+    <div class="space-y-1 text-xs">
+      <div class="flex justify-between"><span class="text-gray-500">スコア</span><span id="hudScore" class="text-yellow-400 font-bold">0</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">撃沈数</span><span id="hudKills" class="text-red-400">0</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">深度</span><span id="hudDepth" class="text-cyan-400">150 m</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">速度</span><span id="hudSpeed" class="text-green-400">SLOW</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">ステルス</span><span id="hudStealth" class="text-violet-400">ON</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">魚雷</span><span id="hudTorpedo" class="text-orange-400">4</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">HP</span><span id="hudHP" class="text-red-300">●●●●●</span></div>
+    </div>
+
+    <div class="border-t border-green-900 pt-2">
+      <p class="text-xs text-gray-500 mb-1">深度コントロール</p>
+      <div class="flex gap-1">
+        <button onclick="setDepth('shallow')" id="btnShallow" class="flex-1 py-1 text-xs bg-gray-800 hover:bg-cyan-900 rounded border border-gray-700">浅</button>
+        <button onclick="setDepth('medium')" id="btnMedium" class="flex-1 py-1 text-xs bg-cyan-900 border border-cyan-700 rounded">中</button>
+        <button onclick="setDepth('deep')" id="btnDeep" class="flex-1 py-1 text-xs bg-gray-800 hover:bg-cyan-900 rounded border border-gray-700">深</button>
+      </div>
+    </div>
+
+    <div class="border-t border-green-900 pt-2">
+      <p class="text-xs text-gray-500 mb-1">速度コントロール</p>
+      <div class="flex gap-1">
+        <button onclick="setSpeed('slow')" id="btnSlow" class="flex-1 py-1 text-xs bg-green-900 border border-green-700 rounded">遅</button>
+        <button onclick="setSpeed('fast')" id="btnFast" class="flex-1 py-1 text-xs bg-gray-800 hover:bg-green-900 rounded border border-gray-700">速</button>
+      </div>
+    </div>
+
+    <div class="border-t border-green-900 pt-2">
+      <button onclick="fireToggle()" id="btnStealth" class="w-full py-1 text-xs bg-violet-900 hover:bg-violet-800 border border-violet-700 rounded mb-1">ステルス切替</button>
+      <button onclick="fireTorpedo()" class="w-full py-2 text-sm bg-red-800 hover:bg-red-700 border border-red-600 rounded font-bold">🚀 魚雷発射 [F]</button>
+    </div>
+
+    <div class="border-t border-green-900 pt-2 text-xs text-gray-600">
+      <p>WASD / 矢印キー: 移動</p>
+      <p>F: 魚雷発射</p>
+      <p>S: ステルス切替</p>
+    </div>
+
+    <div id="alertMsg" class="text-xs text-red-400 min-h-4 text-center"></div>
+  </div>
+</div>
+
+<script>
+function escapeHtml(str){return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');}
+
+const canvas = document.getElementById('sonarCanvas');
+const ctx = canvas.getContext('2d');
+let W, H, CX, CY, RADIUS;
+
+// Game state
+let state = {
+  running: false,
+  score: 0,
+  kills: 0,
+  hp: 5,
+  torpedoes: 4,
+  depth: 'medium', // shallow/medium/deep
+  speed: 'slow',
+  stealth: true,
+  sub: { x: 0, y: 0, vx: 0, vy: 0 },
+  enemies: [],
+  torpedoList: [],
+  mines: [],
+  mountains: [],
+  scanAngle: 0,
+  particles: [],
+  blips: [],
+  frame: 0,
+  alertTimer: 0
+};
+
+function resize() {
+  const panel = document.querySelector('.flex-1');
+  const rect = panel.getBoundingClientRect();
+  W = rect.width; H = rect.height;
+  canvas.width = W; canvas.height = H;
+  CX = W / 2; CY = H / 2;
+  RADIUS = Math.min(W, H) * 0.45;
+}
+
+function startGame() {
+  resize();
+  state.running = true;
+  state.score = 0;
+  state.kills = 0;
+  state.hp = 5;
+  state.torpedoes = 4;
+  state.sub = { x: 0, y: 0, vx: 0, vy: 0 };
+  state.enemies = [];
+  state.torpedoList = [];
+  state.mines = [];
+  state.particles = [];
+  state.blips = [];
+  state.frame = 0;
+  state.depth = 'medium';
+  state.speed = 'slow';
+  state.stealth = true;
+
+  // Generate seabed mountains (obstacles)
+  state.mountains = Array.from({length: 8}, () => ({
+    x: (Math.random() - 0.5) * RADIUS * 1.6,
+    y: (Math.random() - 0.5) * RADIUS * 1.6,
+    r: 15 + Math.random() * 25
+  })).filter(m => Math.hypot(m.x, m.y) < RADIUS * 0.85);
+
+  // Generate mines
+  state.mines = Array.from({length: 6}, () => {
+    let m;
+    do {
+      m = { x: (Math.random()-0.5)*RADIUS*1.4, y: (Math.random()-0.5)*RADIUS*1.4, r: 8 };
+    } while (Math.hypot(m.x,m.y) < 80 || Math.hypot(m.x,m.y) > RADIUS*0.85);
+    return m;
+  });
+
+  document.getElementById('gameOverlay').classList.add('hidden');
+  updateHUD();
+  loop();
+}
+
+function spawnEnemy() {
+  const angle = Math.random() * Math.PI * 2;
+  const r = RADIUS * 0.7 + Math.random() * RADIUS * 0.15;
+  state.enemies.push({
+    x: Math.cos(angle) * r,
+    y: Math.sin(angle) * r,
+    vx: (Math.random()-0.5) * 0.8,
+    vy: (Math.random()-0.5) * 0.8,
+    hp: 2,
+    detected: false,
+    detectionTimer: 0
+  });
+}
+
+function setDepth(d) {
+  state.depth = d;
+  ['shallow','medium','deep'].forEach(lvl => {
+    document.getElementById('btn' + lvl.charAt(0).toUpperCase() + lvl.slice(1)).className =
+      `flex-1 py-1 text-xs rounded border ${d === lvl ? 'bg-cyan-900 border-cyan-700' : 'bg-gray-800 hover:bg-cyan-900 border-gray-700'}`;
+  });
+  updateHUD();
+}
+
+function setSpeed(s) {
+  state.speed = s;
+  ['slow','fast'].forEach(sp => {
+    document.getElementById('btn' + sp.charAt(0).toUpperCase() + sp.slice(1)).className =
+      `flex-1 py-1 text-xs rounded border ${s === sp ? 'bg-green-900 border-green-700' : 'bg-gray-800 hover:bg-green-900 border-gray-700'}`;
+  });
+  updateHUD();
+}
+
+function fireToggle() {
+  state.stealth = !state.stealth;
+  updateHUD();
+}
+
+function fireTorpedo() {
+  if (!state.running || state.torpedoes <= 0) return;
+  state.torpedoes--;
+  const angle = Math.atan2(state.sub.vy || -1, state.sub.vx || 1);
+  state.torpedoList.push({
+    x: state.sub.x, y: state.sub.y,
+    vx: Math.cos(angle) * 6,
+    vy: Math.sin(angle) * 6,
+    life: 120
+  });
+  updateHUD();
+}
+
+function updateHUD() {
+  document.getElementById('hudScore').textContent = state.score;
+  document.getElementById('hudKills').textContent = state.kills;
+  document.getElementById('hudDepth').textContent = {shallow:'50 m',medium:'150 m',deep:'300 m'}[state.depth];
+  document.getElementById('hudSpeed').textContent = state.speed === 'slow' ? 'SLOW' : 'FAST';
+  document.getElementById('hudStealth').textContent = state.stealth ? 'ON' : 'OFF';
+  document.getElementById('hudTorpedo').textContent = state.torpedoes;
+  document.getElementById('hudHP').textContent = '●'.repeat(state.hp) + '○'.repeat(Math.max(0,5-state.hp));
+}
+
+function showAlert(msg) {
+  document.getElementById('alertMsg').textContent = msg;
+  state.alertTimer = 120;
+}
+
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key.toLowerCase() === 'f') fireTorpedo();
+  if (e.key.toLowerCase() === 's') fireToggle();
+  e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+// Touch controls for mobile - directional via canvas touch
+let touchStart = null;
+canvas.addEventListener('touchstart', e => { touchStart = {x: e.touches[0].clientX, y: e.touches[0].clientY}; e.preventDefault(); });
+canvas.addEventListener('touchmove', e => {
+  if (!touchStart) return;
+  const dx = e.touches[0].clientX - touchStart.x;
+  const dy = e.touches[0].clientY - touchStart.y;
+  const spd = state.speed === 'fast' ? 3 : 1.5;
+  if (Math.abs(dx) > 10) state.sub.vx = Math.sign(dx) * spd;
+  if (Math.abs(dy) > 10) state.sub.vy = Math.sign(dy) * spd;
+  e.preventDefault();
+}, {passive: false});
+canvas.addEventListener('touchend', () => { touchStart = null; state.sub.vx *= 0.5; state.sub.vy *= 0.5; });
+
+function update() {
+  const s = state;
+  if (!s.running) return;
+  s.frame++;
+
+  // Movement
+  const spd = s.speed === 'fast' ? 3.5 : 1.8;
+  if (keys['arrowleft'] || keys['a']) s.sub.vx = -spd;
+  else if (keys['arrowright'] || keys['d']) s.sub.vx = spd;
+  else s.sub.vx *= 0.85;
+  if (keys['arrowup'] || keys['w']) s.sub.vy = -spd;
+  else if (keys['arrowdown'] || keys['s']) s.sub.vy = spd;
+  else s.sub.vy *= 0.85;
+
+  s.sub.x += s.sub.vx;
+  s.sub.y += s.sub.vy;
+
+  // Clamp to sonar circle
+  const dist = Math.hypot(s.sub.x, s.sub.y);
+  if (dist > RADIUS * 0.9) {
+    s.sub.x *= RADIUS * 0.9 / dist;
+    s.sub.y *= RADIUS * 0.9 / dist;
+    s.sub.vx *= -0.5; s.sub.vy *= -0.5;
+    showAlert('境界線に接触！');
+  }
+
+  // Scan
+  s.scanAngle += 0.025;
+
+  // Spawn enemies
+  if (s.frame % 180 === 0) spawnEnemy();
+  if (s.torpedoes < 4 && s.frame % 600 === 0) { s.torpedoes++; updateHUD(); }
+
+  // Update enemies
+  s.enemies = s.enemies.filter(e => e.hp > 0);
+  s.enemies.forEach(e => {
+    // Patrol
+    e.x += e.vx; e.y += e.vy;
+    const er = Math.hypot(e.x, e.y);
+    if (er > RADIUS * 0.9) { e.vx *= -1; e.vy *= -1; }
+
+    // Detect sub (if not stealthy, or fast)
+    const visibility = (s.stealth ? 0.3 : 1.0) * (s.speed === 'fast' ? 2 : 1);
+    const dist2sub = Math.hypot(e.x - s.sub.x, e.y - s.sub.y);
+    if (dist2sub < 80 * visibility) {
+      e.detectionTimer++;
+      if (e.detectionTimer > 60) {
+        // Chase
+        const ang = Math.atan2(s.sub.y - e.y, s.sub.x - e.x);
+        e.vx = Math.cos(ang) * 1.2; e.vy = Math.sin(ang) * 1.2;
+      }
+    } else {
+      e.detectionTimer = Math.max(0, e.detectionTimer - 1);
+    }
+
+    // Collide with sub
+    if (dist2sub < 20) {
+      s.hp--;
+      s.particles.push(...makeExplosion(s.sub.x, s.sub.y, '#F87171'));
+      e.hp = 0;
+      showAlert('被弾！深度変更で回避！');
+      updateHUD();
+      if (s.hp <= 0) gameOver(false);
+    }
+
+    // Collide with mountains
+    s.mountains.forEach(m => {
+      if (Math.hypot(e.x - m.x, e.y - m.y) < m.r + 8) {
+        e.vx = -e.vx; e.vy = -e.vy;
+      }
+    });
+  });
+
+  // Mine collision
+  s.mines.forEach(m => {
+    if (Math.hypot(s.sub.x - m.x, s.sub.y - m.y) < m.r + 8) {
+      s.hp -= 2;
+      s.particles.push(...makeExplosion(s.sub.x, s.sub.y, '#FFA500'));
+      m.x = 9999; // disable
+      showAlert('機雷に接触！');
+      updateHUD();
+      if (s.hp <= 0) gameOver(false);
+    }
+  });
+
+  // Torpedos
+  s.torpedoList = s.torpedoList.filter(t => t.life > 0);
+  s.torpedoList.forEach(t => {
+    t.x += t.vx; t.y += t.vy; t.life--;
+    // Hit enemy
+    s.enemies.forEach(e => {
+      if (e.hp > 0 && Math.hypot(t.x - e.x, t.y - e.y) < 16) {
+        e.hp--; t.life = 0;
+        if (e.hp <= 0) {
+          s.kills++;
+          s.score += 100;
+          s.particles.push(...makeExplosion(e.x, e.y, '#FB923C'));
+          showAlert('撃沈！+100pts');
+        }
+        updateHUD();
+      }
+    });
+    // Out of bounds
+    if (Math.hypot(t.x, t.y) > RADIUS) t.life = 0;
+  });
+
+  // Particles
+  s.particles = s.particles.filter(p => p.life > 0);
+  s.particles.forEach(p => {
+    p.x += p.vx; p.y += p.vy; p.life--;
+    p.vx *= 0.92; p.vy *= 0.92;
+  });
+
+  // Alert timer
+  if (s.alertTimer > 0) {
+    s.alertTimer--;
+    if (s.alertTimer === 0) document.getElementById('alertMsg').textContent = '';
+  }
+
+  // Score for survival
+  if (s.frame % 300 === 0) { s.score += 10; updateHUD(); }
+}
+
+function makeExplosion(x, y, color) {
+  return Array.from({length: 12}, () => ({
+    x, y, color,
+    vx: (Math.random()-0.5)*4,
+    vy: (Math.random()-0.5)*4,
+    life: 30 + Math.random()*20,
+    r: 2 + Math.random()*3
+  }));
+}
+
+function gameOver(win) {
+  state.running = false;
+  document.getElementById('gameOverlay').classList.remove('hidden');
+  document.getElementById('overlayTitle').textContent = win ? '任務完了！' : 'ゲームオーバー';
+  document.getElementById('overlayTitle').className = `text-3xl font-bold mb-2 ${win ? 'text-green-300' : 'text-red-400'}`;
+  document.getElementById('overlayScore').textContent = `スコア: ${state.score} | 撃沈: ${state.kills}`;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(CX, CY);
+
+  // Sonar circle background
+  const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, RADIUS);
+  grad.addColorStop(0, '#001a00');
+  grad.addColorStop(1, '#000800');
+  ctx.beginPath();
+  ctx.arc(0, 0, RADIUS, 0, Math.PI * 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Grid rings
+  for (let i = 1; i <= 4; i++) {
+    ctx.beginPath();
+    ctx.arc(0, 0, RADIUS * i / 4, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0,80,0,0.3)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  // Cross hairs
+  ctx.strokeStyle = 'rgba(0,80,0,0.2)';
+  ctx.beginPath(); ctx.moveTo(-RADIUS, 0); ctx.lineTo(RADIUS, 0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, -RADIUS); ctx.lineTo(0, RADIUS); ctx.stroke();
+
+  // Scan sweep
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.arc(0, 0, RADIUS, state.scanAngle - 0.5, state.scanAngle);
+  ctx.closePath();
+  const scanGrad = ctx.createConicalGradient ? null : null;
+  ctx.fillStyle = 'rgba(0,255,0,0.08)';
+  ctx.fill();
+  // Scan line
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(Math.cos(state.scanAngle) * RADIUS, Math.sin(state.scanAngle) * RADIUS);
+  ctx.strokeStyle = 'rgba(0,255,80,0.7)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Mountains (seabed obstacles)
+  state.mountains.forEach(m => {
+    ctx.beginPath();
+    ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#1a1a2e';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 2;
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#475569';
+    ctx.font = '8px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('⛰', m.x, m.y);
+  });
+
+  // Mines
+  state.mines.forEach(m => {
+    if (m.x > 9000) return;
+    ctx.beginPath();
+    ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#450a0a';
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 1;
+    ctx.fill(); ctx.stroke();
+    // Mine spikes
+    for (let i = 0; i < 6; i++) {
+      const a = i * Math.PI / 3;
+      ctx.beginPath();
+      ctx.moveTo(m.x + Math.cos(a)*m.r, m.y + Math.sin(a)*m.r);
+      ctx.lineTo(m.x + Math.cos(a)*(m.r+4), m.y + Math.sin(a)*(m.r+4));
+      ctx.strokeStyle = '#ef4444';
+      ctx.stroke();
+    }
+  });
+
+  // Enemies (only visible when scan sweeps near them or not stealthy)
+  state.enemies.forEach(e => {
+    if (e.hp <= 0) return;
+    const eAngle = Math.atan2(e.y, e.x);
+    const normalizedDiff = ((eAngle - state.scanAngle) % (Math.PI*2) + Math.PI*2) % (Math.PI*2);
+    const visible = normalizedDiff < 0.6 || normalizedDiff > Math.PI * 2 - 0.3;
+
+    if (visible || e.detectionTimer > 30) {
+      // Draw blip
+      const alpha = visible ? 1 : 0.5;
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, 8, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(239,68,68,${alpha})`;
+      ctx.fill();
+      ctx.fillStyle = `rgba(255,200,200,${alpha})`;
+      ctx.font = '10px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('◈', e.x, e.y);
+
+      if (e.detectionTimer > 30) {
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, 12 + Math.sin(state.frame*0.1)*3, 0, Math.PI*2);
+        ctx.strokeStyle = 'rgba(255,100,100,0.5)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+  });
+
+  // Torpedos
+  state.torpedoList.forEach(t => {
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#fb923c';
+    ctx.fill();
+    // Trail
+    ctx.beginPath();
+    ctx.moveTo(t.x, t.y);
+    ctx.lineTo(t.x - t.vx * 5, t.y - t.vy * 5);
+    ctx.strokeStyle = 'rgba(251,146,60,0.3)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  });
+
+  // Particles
+  state.particles.forEach(p => {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r * (p.life/50), 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = p.life / 50;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+
+  // Player submarine
+  const subAlpha = state.stealth ? 0.7 + Math.sin(state.frame*0.05)*0.3 : 1;
+  ctx.globalAlpha = subAlpha;
+  ctx.beginPath();
+  ctx.ellipse(state.sub.x, state.sub.y, 12, 7, Math.atan2(state.sub.vy, state.sub.vx) || 0, 0, Math.PI*2);
+  ctx.fillStyle = '#4F46E5';
+  ctx.strokeStyle = '#818CF8';
+  ctx.lineWidth = 2;
+  ctx.fill();
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#c7d2fe';
+  ctx.font = '9px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('潜', state.sub.x, state.sub.y);
+
+  // Sonar border
+  ctx.beginPath();
+  ctx.arc(0, 0, RADIUS, 0, Math.PI * 2);
+  ctx.strokeStyle = '#166534';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // Range rings label
+  ctx.fillStyle = 'rgba(0,200,0,0.3)';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'left';
+  [0.25, 0.5, 0.75, 1].forEach((r, i) => {
+    ctx.fillText(`${(i+1)*5}km`, RADIUS * r + 2, -3);
+  });
+
+  ctx.restore();
+}
+
+function loop() {
+  if (!state.running && state.frame > 0) { draw(); return; }
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+window.addEventListener('resize', () => {
+  resize();
+  if (state.running) { state.sub.x = 0; state.sub.y = 0; }
+});
+resize();
+document.getElementById('gameOverlay').classList.remove('hidden');
+</script>
+</body>
+</html>
